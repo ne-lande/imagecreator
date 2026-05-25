@@ -1,0 +1,106 @@
+variant: flatcar
+version: 1.0.0
+
+storage:
+  files:
+    - path: /etc/docker/daemon.json
+      mode: 0644
+      contents:
+        inline: |
+          {
+            "insecure-registries": ["192.168.100.1:5000"]
+          }
+
+    - path: /etc/ssh/sshd_config.d/10-hardening.conf
+      mode: 0600
+      contents:
+        inline: |
+          # Disable all password-based authentication
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          ChallengeResponseAuthentication no
+          UsePAM no
+
+          # Disable root login entirely
+          PermitRootLogin no
+
+          # Only allow key-based authentication
+          PubkeyAuthentication yes
+          AuthenticationMethods publickey
+
+          # Per-user overrides
+          Match User service
+            AllowTcpForwarding yes
+
+    - path: /etc/systemd/network/10-tap.network
+      mode: 0644
+      contents:
+        inline: |
+          [Match]
+          MACAddress=52:54:00:12:34:56
+
+          [Network]
+          Address=192.168.100.10/24
+          Gateway=192.168.100.1
+          DNS=8.8.8.8
+          DNS=8.8.4.4
+
+    - path: /etc/systemd/resolved.conf.d/dns.conf
+      mode: 0644
+      contents:
+        inline: |
+          [Resolve]
+          DNS=8.8.8.8 8.8.4.4
+          FallbackDNS=1.1.1.1 1.0.0.1
+          DNSStubListener=yes
+
+    # Sudoers entry for service user — can run docker commands
+    - path: /etc/sudoers.d/service
+      mode: 0440
+      contents:
+        inline: |
+          service ALL=(ALL) NOPASSWD: /usr/bin/docker, /usr/bin/systemctl
+
+passwd:
+  users:
+    - name: service
+      shell: /bin/bash
+      groups:
+        - docker
+        - sudo
+      ssh_authorized_keys:
+        - SERVICE_SSH_PUBLIC_KEY_PLACEHOLDER
+
+systemd:
+  units:
+    - name: sshd.service
+      enabled: true
+
+    - name: systemd-resolved.service
+      enabled: true
+
+    - name: docker.service
+      enabled: true
+
+    - name: agent.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Crude Agent
+        After=docker.service
+        Requires=docker.service
+
+        [Service]
+        Restart=always
+        RestartSec=5s
+        ExecStartPre=-/usr/bin/docker rm -f agent
+        ExecStartPre=/usr/bin/docker pull 192.168.100.1:5000/crudeagent:latest
+        ExecStart=/usr/bin/docker run \
+          --name agent \
+          -p 8080:8080 \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          192.168.100.1:5000/crudeagent:latest
+        ExecStop=/usr/bin/docker stop agent
+
+        [Install]
+        WantedBy=multi-user.target

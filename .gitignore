@@ -1,0 +1,5 @@
+config.json
+config.yaml.rendered
+.direnv
+.ssh/
+flatcar_production_qemu*
