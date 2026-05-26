@@ -1,8 +1,14 @@
 ## ImageCreator
 
-Builds and launches a Flatcar Linux QEMU VM pre-configured to run the CrudeAgent container on boot. The VM pulls the agent image from a local Docker registry over a TAP/bridge network.
+Builds and launches a Flatcar Linux QEMU VM pre-configured to run the CrudeAgent container on boot. The VM pulls the agent image from a local Docker registry.
 
-### Architecture
+> **Platform support:** full scripts are provided for both **Linux** (`setup.sh` / `download.sh`) and **Windows** (`setup.ps1` / `download.ps1`). Jump to the relevant section below.
+
+---
+
+## Linux
+
+### Architecture (Linux — TAP/bridge)
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -21,7 +27,7 @@ Builds and launches a Flatcar Linux QEMU VM pre-configured to run the CrudeAgent
 └─────────────────────────────────────────────────┘
 ```
 
-### Prerequisites
+### Prerequisites (Linux)
 
 - QEMU (`qemu-system-x86_64`)
 - [Butane](https://coreos.github.io/butane/) (Flatcar config transpiler)
@@ -35,19 +41,7 @@ A Nix flake is provided for convenience:
 nix develop   # drops you into a shell with qemu, butane, libguestfs
 ```
 
-### Files
-
-| File | Description |
-|------|-------------|
-| `setup.sh` | Main entry point — builds the agent, generates SSH keys, configures networking, and launches the VM |
-| `download.sh` | Downloads Flatcar QEMU UEFI artifacts (image, EFI code/vars, launch script) |
-| `config.yaml` | Butane config (Flatcar variant) — defines Ignition provisioning with FDE, SSH users, and services |
-| `config.ign` | Compiled Ignition JSON (generated from `config.yaml` by Butane) |
-| `flatcar_production_qemu_uefi.sh` | Upstream Flatcar QEMU launch wrapper (downloaded by `download.sh`) |
-| `flake.nix` | Nix dev shell with `qemu`, `butane`, and `libguestfs-with-appliance` |
-| `.ssh/` | Auto-generated SSH keypairs for `nobody` and `service` users (gitignored) |
-
-### Quick Start
+### Quick Start (Linux)
 
 **1. Download Flatcar artifacts**
 
@@ -55,12 +49,6 @@ nix develop   # drops you into a shell with qemu, butane, libguestfs
 cd imagecreator
 bash download.sh
 ```
-
-This fetches from `https://stable.release.flatcar-linux.net/amd64-usr/current/`:
-- `flatcar_production_qemu_uefi_image.img`
-- `flatcar_production_qemu_uefi_efi_code.qcow2`
-- `flatcar_production_qemu_uefi_efi_vars.qcow2`
-- `flatcar_production_qemu_uefi.sh`
 
 **2. Run the setup script**
 
@@ -79,7 +67,7 @@ bash setup.sh
 7. **Enable** IP forwarding and NAT so the VM can reach the registry
 8. **Launch** the QEMU VM with the Ignition config and TAP networking
 
-**3. Access the agent**
+**3. Access the agent (Linux)**
 
 Once the VM boots (typically 30–60 seconds), the CrudeAgent API is available at:
 
@@ -87,15 +75,141 @@ Once the VM boots (typically 30–60 seconds), the CrudeAgent API is available a
 http://192.168.100.10:8080/
 ```
 
-**4. SSH into the VM**
+**4. SSH into the VM (Linux)**
 
 ```bash
-# Debugging shell (restricted)
-ssh -i .ssh/nobody_ed25519 nobody@192.168.100.10
-
 # Service account (docker + sudo access)
 ssh -i .ssh/service_ed25519 service@192.168.100.10
 ```
+
+---
+
+## Windows
+
+### Architecture (Windows — QEMU SLIRP user-mode networking)
+
+On Windows, TAP/bridge devices are not available without third-party drivers.
+`setup.ps1` uses QEMU's built-in **user-mode (SLIRP) networking** instead.
+The VM's ports are forwarded to `localhost` on the host:
+
+```
+┌──────────────────────────────────────────────────────┐
+│  Host (Windows)                                      │
+│                                                      │
+│  ┌──────────────┐    ┌────────────────────────────┐  │
+│  │ Docker        │    │ QEMU VM (Flatcar)          │  │
+│  │ Registry :5000│◄───│  10.0.2.15 (DHCP/SLIRP)   │  │
+│  └──────────────┘    │                            │  │
+│        ▲              │  ┌──────────────────────┐  │  │
+│  localhost:5000       │  │ crudeagent:latest     │  │  │
+│  (10.0.2.2 in VM)     │  │ (port 8080)          │  │  │
+│                       │  └──────────────────────┘  │  │
+│  localhost:8080 ◄─────┤  port-forwarded to host    │  │
+│  localhost:2222 ◄─────┤  SSH port-forwarded        │  │
+│                       └────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
+```
+
+### Prerequisites (Windows)
+
+| Requirement | Notes |
+|-------------|-------|
+| **Windows 10 / 11** (64-bit) | |
+| **QEMU for Windows** | Download from <https://www.qemu.org/download/#windows>; add the install directory to `PATH` |
+| **Docker Desktop** | <https://www.docker.com/products/docker-desktop/> |
+| **OpenSSH Client** | Included in Windows 10 1809+; enable via *Settings → Apps → Optional Features* |
+| **PowerShell 5.1+** | Included in Windows 10+; PowerShell 7 also works |
+| **Butane** (optional) | `setup.ps1` downloads `butane.exe` automatically if not found in `PATH` |
+| **WHPX** (optional) | Enable *Windows Hypervisor Platform* in *Windows Features* for near-native VM speed |
+
+> **No admin rights required** — SLIRP networking runs entirely in user space.
+
+### Quick Start (Windows)
+
+Open **PowerShell** (no elevation needed) and run:
+
+**1. Download Flatcar artifacts**
+
+```powershell
+cd imagecreator
+.\download.ps1
+```
+
+This fetches from `https://stable.release.flatcar-linux.net/amd64-usr/current/`:
+- `flatcar_production_qemu_uefi_image.img`
+- `flatcar_production_qemu_uefi_efi_code.qcow2`
+- `flatcar_production_qemu_uefi_efi_vars.qcow2`
+- `flatcar_production_qemu_uefi.sh`
+
+If PowerShell blocks script execution, run once:
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+**2. Run the setup script**
+
+```powershell
+.\setup.ps1
+```
+
+`setup.ps1` performs the following steps:
+
+1. **Generate SSH keys** for the `service` user (stored in `.ssh/`)
+2. **Build** the CrudeAgent native image via `crudeagent/native.Dockerfile`
+3. **Start** a local Docker registry on port `5000`
+4. **Tag & push** the agent image to `localhost:5000/crudeagent:latest`
+5. **Download `butane.exe`** (if not already in `PATH`) and **transpile** `config.yaml` → `config.ign`
+6. **Reset** the VM image and EFI vars to pristine state (forces Ignition provisioning)
+7. **Launch** the QEMU VM with SLIRP networking and port forwards
+
+Optional parameters:
+
+```powershell
+.\setup.ps1 -SkipBuild      # skip Docker image build
+.\setup.ps1 -SkipRegistry   # skip starting the registry
+.\setup.ps1 -SshPort 2222   # change SSH forward port (default 2222)
+.\setup.ps1 -AgentPort 8080 # change agent forward port (default 8080)
+.\setup.ps1 -Memory 4096    # set VM RAM in MB (default 2048)
+```
+
+**3. Access the agent (Windows)**
+
+Once the VM boots (typically 60–120 seconds on TCG, 30–60 s with WHPX):
+
+```
+http://localhost:8080/
+```
+
+**4. SSH into the VM (Windows)**
+
+```powershell
+# Service account (docker + sudo access)
+ssh -i .ssh\service_ed25519 -p 2222 service@localhost
+```
+
+### Windows — Networking Notes
+
+| Item | Linux (TAP) | Windows (SLIRP) |
+|------|-------------|-----------------|
+| VM IP | `192.168.100.10` (static) | `10.0.2.15` (DHCP) |
+| Host IP from VM | `192.168.100.1` | `10.0.2.2` |
+| Docker registry URL (in VM) | `192.168.100.1:5000` | `10.0.2.2:5000` |
+| Agent URL (from host) | `http://192.168.100.10:8080/` | `http://localhost:8080/` |
+| SSH (from host) | `ssh service@192.168.100.10` | `ssh -p 2222 service@localhost` |
+| Admin rights needed | Yes (bridge/TAP) | No |
+
+`setup.ps1` automatically rewrites `192.168.100.1` → `10.0.2.2` in the rendered Butane config so the VM's `agent.service` and Docker daemon point at the correct registry address.
+
+### Windows — Accelerator Notes
+
+QEMU tries accelerators in order: **WHPX → TCG**.
+
+- **WHPX** (Windows Hypervisor Platform): near-native speed. Enable in *Windows Features → Windows Hypervisor Platform*, then reboot.
+- **TCG** (software emulation): always available, but significantly slower (expect 3–5× longer boot time).
+
+Hyper-V and WHPX can coexist; you do **not** need to disable Hyper-V.
+
+---
 
 ### Security Features
 
