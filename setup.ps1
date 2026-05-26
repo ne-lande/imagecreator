@@ -60,6 +60,12 @@
 .PARAMETER NoDisplay
     Run QEMU without a graphical window (serial console only, -nographic).
     Useful for headless / CI environments.
+.PARAMETER UseWhpx
+    Try WHPX (Windows Hypervisor Platform) acceleration before falling back to
+    TCG. By default only TCG is used to avoid the noisy WHPX warning on
+    machines where the feature is not enabled.
+    Enable "Windows Hypervisor Platform" in Windows Features and reboot, then
+    pass this switch for near-native VM speed.
 #>
 [CmdletBinding()]
 param(
@@ -73,7 +79,8 @@ param(
     [int]      $AgentPort     = 8080,
     [int]      $Memory        = 2048,
     [string[]] $ForwardPorts  = @(),
-    [switch]   $NoDisplay
+    [switch]   $NoDisplay,
+    [switch]   $UseWhpx
 )
 
 # -SkipAgent is a convenience alias for -SkipBuild + -SkipPush
@@ -110,20 +117,30 @@ $UseDockerHub = ($Registry -eq "docker.io")
 
 if ($UseDockerHub) {
     if ($DockerHubUser -eq "") {
-        # Try to read the logged-in Docker Hub username from the config
+        # Try to detect the username from the local Docker config (set by 'docker login').
+        # This is only needed to construct the image name; the VM pulls anonymously
+        # from a public image and does not require Docker Hub credentials itself.
         try {
             $dockerCfg = Get-Content (Join-Path $env:USERPROFILE ".docker\config.json") -Raw -ErrorAction Stop | ConvertFrom-Json
             $DockerHubUser = $dockerCfg.auths.'https://index.docker.io/v1/'.PSObject.Properties.Name | Select-Object -First 1
         } catch {}
         if ($DockerHubUser -eq "" -or $null -eq $DockerHubUser) {
-            Write-Error "Docker Hub mode requires -DockerHubUser <username> (or log in with 'docker login' first)."
+            Write-Error (
+                "Cannot determine Docker Hub username.`n" +
+                "Supply it explicitly:  .\setup.ps1 -DockerHubUser <username>`n" +
+                "Note: 'docker login' is only required on this host when pushing (-SkipAgent is NOT set).`n" +
+                "The VM pulls the image anonymously from a public Docker Hub repository."
+            )
         }
     }
-    # Image the VM will pull from Docker Hub
+    # Image the VM will pull from Docker Hub (public pull, no auth needed in VM)
     $AgentImage    = "${DockerHubUser}/crudeagent:latest"
     # Address the VM uses to reach the registry (public internet via SLIRP NAT)
     $VmRegistryRef = $AgentImage
     Write-Host "Registry mode: Docker Hub  ->  $AgentImage" -ForegroundColor Cyan
+    if ($SkipPush) {
+        Write-Host "  (push skipped - image must already be public on Docker Hub)" -ForegroundColor Yellow
+    }
 } else {
     # Custom / local registry
     # The VM reaches the host at 10.0.2.2 via SLIRP; replace any explicit host
@@ -375,8 +392,11 @@ Write-Host ""
 $QemuArgs = @(
     "-name",    $VmName,
     "-m",       $Memory,
-    # Machine: prefer WHPX (Windows Hypervisor Platform), fall back to TCG
-    "-machine", "q35,accel=whpx:tcg,smm=on",
+    # Machine / accelerator:
+    #   Default: TCG only (software emulation, always works, no warning spam).
+    #   Pass -UseWhpx to try WHPX first for near-native speed; requires
+    #   "Windows Hypervisor Platform" to be enabled in Windows Features.
+    "-machine", ("q35,accel=" + $(if ($UseWhpx) { "whpx:tcg" } else { "tcg" }) + ",smm=on"),
     "-cpu",     "max",
     "-smp",     $NumCpus,
     "-global",  "ICH9-LPC.disable_s3=1",

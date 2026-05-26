@@ -175,6 +175,7 @@ Optional parameters:
 .\setup.ps1 -AgentPort 8080 # change agent forward port (default 8080)
 .\setup.ps1 -Memory 4096    # set VM RAM in MB (default 2048)
 .\setup.ps1 -NoDisplay      # headless / serial-console only (no SDL window)
+.\setup.ps1 -UseWhpx        # enable WHPX acceleration (see accelerator notes below)
 
 # Registry selection (default: Docker Hub):
 .\setup.ps1 -Registry docker.io -DockerHubUser myuser   # push/pull via Docker Hub (default)
@@ -225,12 +226,26 @@ ssh -i .ssh\service_ed25519 -p 2222 service@localhost
 
 `setup.ps1` automatically rewrites `192.168.100.1` → `10.0.2.2` in the rendered Butane config so the VM's `agent.service` and Docker daemon point at the correct registry address.
 
-### Windows — Accelerator Notes
+### Windows - Accelerator Notes
 
-QEMU tries accelerators in order: **WHPX → TCG**.
+By default `setup.ps1` uses **TCG** (software emulation) only, which always
+works without any configuration and produces no warning messages.
 
-- **WHPX** (Windows Hypervisor Platform): near-native speed. Enable in *Windows Features → Windows Hypervisor Platform*, then reboot.
-- **TCG** (software emulation): always available, but significantly slower (expect 3–5× longer boot time).
+To enable **WHPX** (Windows Hypervisor Platform) for near-native speed:
+
+1. Open *Windows Features* and tick **Windows Hypervisor Platform**, then reboot.
+2. Pass `-UseWhpx` to `setup.ps1`:
+
+```powershell
+.\setup.ps1 -UseWhpx
+```
+
+QEMU will then try WHPX first and fall back to TCG automatically if unavailable.
+
+| Accelerator | Speed | Requirement | How to enable |
+|-------------|-------|-------------|---------------|
+| **TCG** (default) | ~3-5x slower than native | None | Always available |
+| **WHPX** | Near-native | Windows Hypervisor Platform feature | `-UseWhpx` flag |
 
 Hyper-V and WHPX can coexist; you do **not** need to disable Hyper-V.
 
