@@ -165,12 +165,37 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 Optional parameters:
 
 ```powershell
-.\setup.ps1 -SkipBuild      # skip Docker image build
-.\setup.ps1 -SkipRegistry   # skip starting the registry
+# Agent image lifecycle:
+.\setup.ps1 -SkipBuild      # skip Docker image build (reuse existing local image)
+.\setup.ps1 -SkipPush       # skip tagging and pushing to the registry
+.\setup.ps1 -SkipAgent      # skip both build AND push (image already in registry)
+
+.\setup.ps1 -SkipRegistry   # skip starting the local registry (ignored for Docker Hub)
 .\setup.ps1 -SshPort 2222   # change SSH forward port (default 2222)
 .\setup.ps1 -AgentPort 8080 # change agent forward port (default 8080)
 .\setup.ps1 -Memory 4096    # set VM RAM in MB (default 2048)
+.\setup.ps1 -NoDisplay      # headless / serial-console only (no SDL window)
+
+# Registry selection (default: Docker Hub):
+.\setup.ps1 -Registry docker.io -DockerHubUser myuser   # push/pull via Docker Hub (default)
+.\setup.ps1 -Registry 192.168.1.5:5000                  # use a custom/private registry
+.\setup.ps1 -Registry localhost:5000                     # use a local registry already running
+
+# Forward extra ports to reach containers running inside the VM:
+.\setup.ps1 -ForwardPorts "3000:3000"
+.\setup.ps1 -ForwardPorts "3000:3000,5432:5432,6379:6379"
+.\setup.ps1 -ForwardPorts @("3000:3000", "5432:5432")
 ```
+
+Each `-ForwardPorts` entry is `hostPort:guestPort` (TCP).
+The default SSH (`2222:22`) and agent (`8080:8080`) forwards are always included.
+
+#### Registry modes
+
+| Mode | Flag | Behaviour |
+|------|------|-----------|
+| **Docker Hub** (default) | `-Registry docker.io -DockerHubUser <user>` | Image pushed to `<user>/crudeagent:latest` on Docker Hub; VM pulls from there over the internet. No local registry container is started. If `-DockerHubUser` is omitted, the logged-in Docker Hub username is detected automatically. |
+| **Custom / private** | `-Registry host:port` | A local `registry:2` container is started on `localhost:<RegistryPort>`; the VM pulls from `10.0.2.2:<port>` via SLIRP. |
 
 **3. Access the agent (Windows)**
 

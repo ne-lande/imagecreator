@@ -5,21 +5,45 @@
 .DESCRIPTION
     Windows equivalent of setup.sh. Key differences from the Linux version:
 
-    * Networking  — uses QEMU user-mode (SLIRP) networking instead of
+    * Networking  - uses QEMU user-mode (SLIRP) networking instead of
                     TAP/bridge devices. No admin rights needed for networking.
                     Port 8080 (agent) and 22 (SSH) are forwarded to the host
                     by default; use -ForwardPorts to expose additional ports.
-    * SSH keys    — generated with ssh-keygen (ships with Windows 10+/OpenSSH).
-    * Butane      — downloaded automatically as a Windows binary if not found
+    * SSH keys    - generated with ssh-keygen (ships with Windows 10+/OpenSSH).
+    * Butane      - downloaded automatically as a Windows binary if not found
                     in PATH.
-    * Docker      — Docker Desktop for Windows is required.
-    * KVM         — replaced by WHPX (Windows Hypervisor Platform) with TCG
+    * Docker      - Docker Desktop for Windows is required.
+    * KVM         - replaced by WHPX (Windows Hypervisor Platform) with TCG
                     fallback; enable WHPX in "Windows Features" for best speed.
 
 .PARAMETER SkipBuild
     Skip building the crudeagent Docker image (use an existing local image).
+.PARAMETER SkipPush
+    Skip tagging and pushing the crudeagent image to the registry.
+    Useful when the image is already present in the registry from a previous run.
+.PARAMETER SkipAgent
+    Convenience switch: skips both -SkipBuild and -SkipPush together.
+    Use this when the agent image is already in the registry and you only want
+    to (re)generate the Ignition config and launch the VM.
 .PARAMETER SkipRegistry
     Skip starting the local Docker registry (assume it is already running).
+    Ignored when -Registry points to Docker Hub (no local registry needed).
+.PARAMETER Registry
+    Docker registry used to distribute the crudeagent image to the VM.
+    Default: "docker.io" (Docker Hub).
+
+    - "docker.io"  (default) - image is pushed to Docker Hub as
+                               <DockerHubUser>/crudeagent:latest and pulled
+                               from there inside the VM. No local registry
+                               container is started. Requires -DockerHubUser.
+    - Any other value        - treated as a local/private registry address
+                               (e.g. "192.168.1.5:5000" or "myregistry:5000").
+                               A local registry container is started on
+                               localhost:<RegistryPort> and the VM pulls from
+                               10.0.2.2:<RegistryPort> via SLIRP.
+.PARAMETER DockerHubUser
+    Docker Hub username. Required when -Registry is "docker.io".
+    The image will be pushed/pulled as <DockerHubUser>/crudeagent:latest.
 .PARAMETER SshPort
     Host port forwarded to the VM's SSH daemon. Default: 2222.
 .PARAMETER AgentPort
@@ -40,13 +64,23 @@
 [CmdletBinding()]
 param(
     [switch]   $SkipBuild,
+    [switch]   $SkipPush,
+    [switch]   $SkipAgent,
     [switch]   $SkipRegistry,
-    [int]      $SshPort      = 2222,
-    [int]      $AgentPort    = 8080,
-    [int]      $Memory       = 2048,
-    [string[]] $ForwardPorts = @(),
+    [string]   $Registry      = "docker.io",
+    [string]   $DockerHubUser = "",
+    [int]      $SshPort       = 2222,
+    [int]      $AgentPort     = 8080,
+    [int]      $Memory        = 2048,
+    [string[]] $ForwardPorts  = @(),
     [switch]   $NoDisplay
 )
+
+# -SkipAgent is a convenience alias for -SkipBuild + -SkipPush
+if ($SkipAgent) {
+    $SkipBuild = $true
+    $SkipPush  = $true
+}
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -58,17 +92,47 @@ $ScriptDir  = $PSScriptRoot
 $ProjectDir = Split-Path $ScriptDir -Parent
 $SshDir     = Join-Path $ScriptDir ".ssh"
 
-$EfiCode    = Join-Path $ScriptDir "flatcar_production_qemu_uefi_efi_code.qcow2"
-$EfiVars    = Join-Path $ScriptDir "flatcar_production_qemu_uefi_efi_vars.qcow2"
-$EfiVarsOrig= Join-Path $ScriptDir "flatcar_production_qemu_uefi_efi_vars.qcow2.orig"
-$VmImage    = Join-Path $ScriptDir "flatcar_production_qemu_uefi_image.img"
-$VmImageOrig= Join-Path $ScriptDir "flatcar_production_qemu_uefi_image.img.orig"
-$ConfigYaml = Join-Path $ScriptDir "config.yaml"
-$ConfigIgn  = Join-Path $ScriptDir "config.ign"
+$EfiCode     = Join-Path $ScriptDir "flatcar_production_qemu_uefi_efi_code.qcow2"
+$EfiVars     = Join-Path $ScriptDir "flatcar_production_qemu_uefi_efi_vars.qcow2"
+$EfiVarsOrig = Join-Path $ScriptDir "flatcar_production_qemu_uefi_efi_vars.qcow2.orig"
+$VmImage     = Join-Path $ScriptDir "flatcar_production_qemu_uefi_image.img"
+$VmImageOrig = Join-Path $ScriptDir "flatcar_production_qemu_uefi_image.img.orig"
+$ConfigYaml  = Join-Path $ScriptDir "config.yaml"
+$ConfigIgn   = Join-Path $ScriptDir "config.ign"
 $ConfigRendered = Join-Path $ScriptDir "config.yaml.rendered"
 
 $RegistryPort = 5000
-$AgentImage   = "localhost:${RegistryPort}/crudeagent:latest"
+
+# ---------------------------------------------------------------------------
+# Resolve registry mode
+# ---------------------------------------------------------------------------
+$UseDockerHub = ($Registry -eq "docker.io")
+
+if ($UseDockerHub) {
+    if ($DockerHubUser -eq "") {
+        # Try to read the logged-in Docker Hub username from the config
+        try {
+            $dockerCfg = Get-Content (Join-Path $env:USERPROFILE ".docker\config.json") -Raw -ErrorAction Stop | ConvertFrom-Json
+            $DockerHubUser = $dockerCfg.auths.'https://index.docker.io/v1/'.PSObject.Properties.Name | Select-Object -First 1
+        } catch {}
+        if ($DockerHubUser -eq "" -or $null -eq $DockerHubUser) {
+            Write-Error "Docker Hub mode requires -DockerHubUser <username> (or log in with 'docker login' first)."
+        }
+    }
+    # Image the VM will pull from Docker Hub
+    $AgentImage    = "${DockerHubUser}/crudeagent:latest"
+    # Address the VM uses to reach the registry (public internet via SLIRP NAT)
+    $VmRegistryRef = $AgentImage
+    Write-Host "Registry mode: Docker Hub  ->  $AgentImage" -ForegroundColor Cyan
+} else {
+    # Custom / local registry
+    # The VM reaches the host at 10.0.2.2 via SLIRP; replace any explicit host
+    # address with 10.0.2.2 so the VM can pull from the local registry.
+    $LocalRegistryHost = $Registry -replace '^[^:]+', '10.0.2.2'
+    $AgentImage        = "localhost:${RegistryPort}/crudeagent:latest"
+    $VmRegistryRef     = "${LocalRegistryHost}/crudeagent:latest"
+    Write-Host "Registry mode: local/custom  ->  $Registry  (VM sees $VmRegistryRef)" -ForegroundColor Cyan
+}
 
 # ---------------------------------------------------------------------------
 # Helper: require a command to be available
@@ -83,7 +147,7 @@ function Require-Command {
 # ---------------------------------------------------------------------------
 # Helper: download a file if it does not exist
 # ---------------------------------------------------------------------------
-function Download-File {
+function Save-FileFromUrl {
     param([string]$Url, [string]$Dest)
     if (Test-Path $Dest) { return }
     Write-Host "  Downloading $(Split-Path $Dest -Leaf) ..."
@@ -105,10 +169,10 @@ function Get-ButanePath {
     $local = Join-Path $ScriptDir "butane.exe"
     if (Test-Path $local) { return $local }
 
-    Write-Host "  butane not found in PATH — downloading Windows binary..." -ForegroundColor Yellow
+    Write-Host "  butane not found in PATH - downloading Windows binary..." -ForegroundColor Yellow
     # Latest release from the Flatcar/Butane GitHub releases
     $ButaneUrl = "https://github.com/coreos/butane/releases/latest/download/butane-x86_64-pc-windows-gnu.exe"
-    Download-File -Url $ButaneUrl -Dest $local
+    Save-FileFromUrl -Url $ButaneUrl -Dest $local
     return $local
 }
 
@@ -148,7 +212,7 @@ $ServicePubkey = $ServicePubkey.Trim()
 # ---------------------------------------------------------------------------
 Write-Host "`n=== Step 2: Build crudeagent Docker image ===" -ForegroundColor Cyan
 if ($SkipBuild) {
-    Write-Host "Skipping build (--SkipBuild)" -ForegroundColor Yellow
+    Write-Host "Skipping build (-SkipBuild)" -ForegroundColor Yellow
 } else {
     $NativeDockerfile = Join-Path $ProjectDir "crudeagent\native.Dockerfile"
     $CrudeagentCtx    = Join-Path $ProjectDir "crudeagent"
@@ -157,11 +221,13 @@ if ($SkipBuild) {
 }
 
 # ---------------------------------------------------------------------------
-# Step 3: Start local Docker registry
+# Step 3: Start local Docker registry (skipped for Docker Hub)
 # ---------------------------------------------------------------------------
 Write-Host "`n=== Step 3: Start local Docker registry ===" -ForegroundColor Cyan
-if ($SkipRegistry) {
-    Write-Host "Skipping registry start (--SkipRegistry)" -ForegroundColor Yellow
+if ($UseDockerHub) {
+    Write-Host "Docker Hub mode - no local registry needed, skipping." -ForegroundColor Yellow
+} elseif ($SkipRegistry) {
+    Write-Host "Skipping registry start (-SkipRegistry)" -ForegroundColor Yellow
 } else {
     $running = & docker ps --format "{{.Names}}" 2>$null | Where-Object { $_ -eq "registry" }
     if ($running) {
@@ -176,25 +242,46 @@ if ($SkipRegistry) {
 }
 
 # ---------------------------------------------------------------------------
-# Step 4: Tag and push image to local registry
+# Step 4: Tag and push image to registry
 # ---------------------------------------------------------------------------
-Write-Host "`n=== Step 4: Tag and push image to local registry ===" -ForegroundColor Cyan
-& docker tag "crudeagent:latest" $AgentImage
-& docker push $AgentImage
-if ($LASTEXITCODE -ne 0) { Write-Error "docker push failed" }
+Write-Host "`n=== Step 4: Tag and push image to registry ===" -ForegroundColor Cyan
+if ($SkipPush) {
+    Write-Host "Skipping tag/push (-SkipPush or -SkipAgent)" -ForegroundColor Yellow
+    Write-Host "Assuming $AgentImage is already available in the registry." -ForegroundColor Yellow
+} else {
+    & docker tag "crudeagent:latest" $AgentImage
+    if ($LASTEXITCODE -ne 0) { Write-Error "docker tag failed" }
+    & docker push $AgentImage
+    if ($LASTEXITCODE -ne 0) { Write-Error "docker push failed" }
+    Write-Host "Pushed $AgentImage" -ForegroundColor Green
+}
 
 # ---------------------------------------------------------------------------
 # Step 5: Render Butane config and transpile to Ignition
 # ---------------------------------------------------------------------------
 Write-Host "`n=== Step 5: Convert Butane config to Ignition ===" -ForegroundColor Cyan
 
-# On Windows the VM cannot reach 192.168.100.1 (no TAP bridge).
-# With SLIRP networking the host is reachable at 10.0.2.2 from inside the VM.
-# We patch the registry address accordingly.
+# Patch the config:
+#   - Replace the SSH key placeholder with the generated public key.
+#   - Replace the registry address so the VM agent.service pulls from the
+#     correct location:
+#       Docker Hub mode  -> image ref is already a public Docker Hub name,
+#                           no address substitution needed.
+#       Local/custom     -> replace 192.168.100.1 with 10.0.2.2 (SLIRP host)
+#                           and rewrite the image ref to $VmRegistryRef.
 $ConfigContent = Get-Content $ConfigYaml -Raw
 $ConfigContent = $ConfigContent -replace 'SERVICE_SSH_PUBLIC_KEY_PLACEHOLDER', $ServicePubkey
-# Replace bridge IP with QEMU SLIRP host gateway
-$ConfigContent = $ConfigContent -replace '192\.168\.100\.1', '10.0.2.2'
+
+if ($UseDockerHub) {
+    # Replace the local registry image reference with the Docker Hub image ref
+    $ConfigContent = $ConfigContent -replace '192\.168\.100\.1:\d+/crudeagent:latest', $VmRegistryRef
+    $ConfigContent = $ConfigContent -replace '192\.168\.100\.1:\d+', 'registry-1.docker.io'
+    # Remove insecure-registries entry (not needed for Docker Hub)
+    $ConfigContent = $ConfigContent -replace '"insecure-registries":\s*\["[^"]*"\]', '"insecure-registries": []'
+} else {
+    # Replace bridge IP with QEMU SLIRP host gateway
+    $ConfigContent = $ConfigContent -replace '192\.168\.100\.1', '10.0.2.2'
+}
 
 Set-Content -Path $ConfigRendered -Value $ConfigContent -Encoding UTF8 -NoNewline
 
@@ -203,7 +290,7 @@ Write-Host "  Using butane: $ButaneBin"
 & $ButaneBin --strict $ConfigRendered | Set-Content -Path $ConfigIgn -Encoding UTF8 -NoNewline
 if ($LASTEXITCODE -ne 0) { Write-Error "butane transpilation failed" }
 Remove-Item $ConfigRendered -Force -ErrorAction SilentlyContinue
-Write-Host "Ignition config written to config.ign" -ForegroundColor Green
+Write-Host "Ignition config written to config.ign (agent will pull $VmRegistryRef)" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
 # Step 6: Reset VM image and EFI vars (force Ignition provisioning)
@@ -220,7 +307,7 @@ if (-not (Test-Path $VmImageOrig)) {
 }
 
 Copy-Item $EfiVarsOrig $EfiVars -Force
-Write-Host "EFI vars reset — Ignition will run on this boot" -ForegroundColor Green
+Write-Host "EFI vars reset - Ignition will run on this boot" -ForegroundColor Green
 Copy-Item $VmImageOrig $VmImage -Force
 Write-Host "VM image reset to pristine state" -ForegroundColor Green
 
@@ -229,14 +316,42 @@ Write-Host "VM image reset to pristine state" -ForegroundColor Green
 # ---------------------------------------------------------------------------
 Write-Host "`n=== Step 7: Launch QEMU VM ===" -ForegroundColor Cyan
 
-# Network note:
-#   - SLIRP user-mode networking: no TAP/bridge, no admin rights needed.
-#   - The VM gets DHCP address 10.0.2.15 by default.
-#   - The Ignition config sets a static IP via MAC 52:54:00:12:34:56 but
-#     that only works with a TAP bridge. On Windows we rely on DHCP/SLIRP
-#     and access the agent via forwarded ports on localhost.
-#   - hostfwd=tcp::8080-:8080  → agent API  at http://localhost:8080/
-#   - hostfwd=tcp::2222-:22    → SSH access at localhost:2222
+# ---------------------------------------------------------------------------
+# Build the -netdev hostfwd string.
+#
+# SLIRP user-mode networking: no TAP/bridge, no admin rights needed.
+# The VM gets DHCP address 10.0.2.15; the host is reachable at 10.0.2.2.
+#
+# Always forwarded:
+#   hostfwd=tcp::<SshPort>-:22     SSH access -> localhost:<SshPort>
+#   hostfwd=tcp::<AgentPort>-:8080 agent API  -> localhost:<AgentPort>
+#
+# Extra ports via -ForwardPorts "hostPort:guestPort,..."
+#   e.g. -ForwardPorts "3000:3000,5432:5432"
+#   or   -ForwardPorts @("3000:3000","5432:5432")
+# ---------------------------------------------------------------------------
+$HostFwds = [System.Collections.Generic.List[string]]@(
+    "hostfwd=tcp::${SshPort}-:22",
+    "hostfwd=tcp::${AgentPort}-:8080"
+)
+
+# Normalise -ForwardPorts: accept both a comma-separated string and an array
+$ExtraPorts = [System.Collections.Generic.List[string]]@()
+foreach ($entry in $ForwardPorts) {
+    foreach ($pair in ($entry -split ',')) {
+        $pair = $pair.Trim()
+        if ($pair -eq '') { continue }
+        if ($pair -notmatch '^\d+:\d+$') {
+            Write-Warning "Ignoring invalid port pair '$pair' (expected hostPort:guestPort)"
+            continue
+        }
+        $hp, $gp = $pair -split ':'
+        $HostFwds.Add("hostfwd=tcp::${hp}-:${gp}")
+        $ExtraPorts.Add($pair)
+    }
+}
+
+$NetdevStr = "user,id=net0," + ($HostFwds -join ',')
 
 $VmName  = "flatcar_production_qemu_uefi-4593-2-1"
 $NumCpus = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
@@ -244,7 +359,14 @@ $NumCpus = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
 Write-Host ""
 Write-Host "VM will be accessible at:" -ForegroundColor Cyan
 Write-Host "  Agent API : http://localhost:${AgentPort}/"
-Write-Host "  SSH       : ssh -i $SshDir\service_ed25519 -p $SshPort service@localhost"
+Write-Host "  SSH       : ssh -i `"$SshDir\service_ed25519`" -p $SshPort service@localhost"
+if ($ExtraPorts.Count -gt 0) {
+    Write-Host "  Extra port forwards (localhost -> VM):"
+    foreach ($p in $ExtraPorts) {
+        $hp, $gp = $p -split ':'
+        Write-Host "    localhost:${hp} -> VM:${gp}" -ForegroundColor DarkCyan
+    }
+}
 Write-Host ""
 Write-Host "Starting QEMU (press Ctrl+C to stop)..." -ForegroundColor Yellow
 Write-Host ""
@@ -267,15 +389,20 @@ $QemuArgs = @(
     "-device",  "virtio-blk-pci,drive=blk,bootindex=1",
     # Ignition config
     "-fw_cfg",  "name=opt/org.flatcar-linux/config,file=${ConfigIgn}",
-    # User-mode networking with port forwards
-    "-netdev",  "user,id=net0,hostfwd=tcp::${SshPort}-:22,hostfwd=tcp::${AgentPort}-:8080",
+    # User-mode networking - all port forwards in one -netdev string
+    "-netdev",  $NetdevStr,
     "-device",  "virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56",
-    # RNG
-    "-object",  "rng-random,filename=/dev/urandom,id=rng0",
-    "-device",  "virtio-rng-pci,rng=rng0",
-    # Display: use SDL window; add -nographic if you prefer console-only
-    "-display", "sdl"
+    # RNG - use rng-builtin on Windows (rng-random requires /dev/urandom which does not exist on Windows)
+    "-object",  "rng-builtin,id=rng0",
+    "-device",  "virtio-rng-pci,rng=rng0"
 )
+
+# Display mode: SDL window by default, serial-only with -NoDisplay
+if ($NoDisplay) {
+    $QemuArgs += @("-nographic")
+} else {
+    $QemuArgs += @("-display", "sdl")
+}
 
 & qemu-system-x86_64 @QemuArgs
 $ExitCode = $LASTEXITCODE
