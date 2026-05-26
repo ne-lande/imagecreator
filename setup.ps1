@@ -300,12 +300,16 @@ if ($UseDockerHub) {
     $ConfigContent = $ConfigContent -replace '192\.168\.100\.1', '10.0.2.2'
 }
 
-Set-Content -Path $ConfigRendered -Value $ConfigContent -Encoding UTF8 -NoNewline
+# Write without BOM - PowerShell 5.1 Set-Content -Encoding UTF8 adds a BOM
+# which causes Ignition's JSON parser to fail ("invalid character" error).
+$Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[System.IO.File]::WriteAllText($ConfigRendered, $ConfigContent, $Utf8NoBom)
 
 $ButaneBin = Get-ButanePath
 Write-Host "  Using butane: $ButaneBin"
-& $ButaneBin --strict $ConfigRendered | Set-Content -Path $ConfigIgn -Encoding UTF8 -NoNewline
+$IgnContent = & $ButaneBin --strict $ConfigRendered
 if ($LASTEXITCODE -ne 0) { Write-Error "butane transpilation failed" }
+[System.IO.File]::WriteAllText($ConfigIgn, ($IgnContent -join "`n"), $Utf8NoBom)
 Remove-Item $ConfigRendered -Force -ErrorAction SilentlyContinue
 Write-Host "Ignition config written to config.ign (agent will pull $VmRegistryRef)" -ForegroundColor Green
 
