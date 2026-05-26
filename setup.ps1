@@ -300,16 +300,37 @@ if ($UseDockerHub) {
     $ConfigContent = $ConfigContent -replace '192\.168\.100\.1', '10.0.2.2'
 }
 
-# Write without BOM - PowerShell 5.1 Set-Content -Encoding UTF8 adds a BOM
-# which causes Ignition's JSON parser to fail ("invalid character" error).
+# Write the rendered Butane YAML without BOM.
+# PowerShell 5.1 Set-Content -Encoding UTF8 always prepends a UTF-8 BOM which
+# causes Ignition's JSON parser to fail ("invalid character" error).
 $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 [System.IO.File]::WriteAllText($ConfigRendered, $ConfigContent, $Utf8NoBom)
 
 $ButaneBin = Get-ButanePath
 Write-Host "  Using butane: $ButaneBin"
-$IgnContent = & $ButaneBin --strict $ConfigRendered
+
+# Run butane and redirect its stdout directly to config.ign via cmd /c so that
+# PowerShell's string pipeline (which re-encodes and may add BOM/CRLF) is
+# bypassed entirely. butane writes plain UTF-8 JSON with no BOM.
+$ButaneEscaped = $ButaneBin  -replace '"', '""'
+$RenderedEscaped = $ConfigRendered -replace '"', '""'
+$IgnEscaped = $ConfigIgn -replace '"', '""'
+cmd /c "`"$ButaneEscaped`" --strict `"$RenderedEscaped`" > `"$IgnEscaped`""
 if ($LASTEXITCODE -ne 0) { Write-Error "butane transpilation failed" }
-[System.IO.File]::WriteAllText($ConfigIgn, ($IgnContent -join "`n"), $Utf8NoBom)
+
+# Verify the output starts with '{' (no BOM)
+$firstByte = [System.IO.File]::ReadAllBytes($ConfigIgn)[0]
+if ($firstByte -ne 0x7B) {  # 0x7B = '{'
+    # Strip BOM if present (EF BB BF)
+    $rawBytes = [System.IO.File]::ReadAllBytes($ConfigIgn)
+    if ($rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
+        Write-Warning "BOM detected in config.ign output - stripping..."
+        [System.IO.File]::WriteAllBytes($ConfigIgn, $rawBytes[3..($rawBytes.Length - 1)])
+    } else {
+        Write-Error "config.ign does not start with '{' (first byte: 0x$($firstByte.ToString('X2'))). Butane output may be invalid."
+    }
+}
+
 Remove-Item $ConfigRendered -Force -ErrorAction SilentlyContinue
 Write-Host "Ignition config written to config.ign (agent will pull $VmRegistryRef)" -ForegroundColor Green
 
