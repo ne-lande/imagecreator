@@ -1,0 +1,122 @@
+variant: flatcar
+version: 1.0.0
+
+# Windows / QEMU SLIRP variant of config.yaml.
+#
+# Key differences from config.yaml:
+#   - Network uses DHCP instead of a static IP.
+#     QEMU SLIRP assigns 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3.
+#     Static IP configuration breaks routing with SLIRP.
+#   - Registry address uses SLIRP host gateway (10.0.2.2) instead of the
+#     Linux TAP bridge address (192.168.100.1).
+#   - insecure-registries is set to the SLIRP host address; setup.ps1
+#     clears it when using Docker Hub (public HTTPS registry).
+#
+# Placeholders substituted by setup.ps1:
+#   SERVICE_SSH_PUBLIC_KEY_PLACEHOLDER  -> generated .ssh/service_ed25519.pub
+#   192.168.100.1                       -> 10.0.2.2  (local registry mode)
+#                                          or removed  (Docker Hub mode)
+
+storage:
+  files:
+    - path: /etc/docker/daemon.json
+      mode: 0644
+      contents:
+        inline: |
+          {
+            "insecure-registries": ["192.168.100.1:5000"]
+          }
+
+    - path: /etc/ssh/sshd_config.d/10-hardening.conf
+      mode: 0600
+      contents:
+        inline: |
+          # Disable all password-based authentication
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          ChallengeResponseAuthentication no
+          UsePAM no
+
+          # Disable root login entirely
+          PermitRootLogin no
+
+          # Only allow key-based authentication
+          PubkeyAuthentication yes
+          AuthenticationMethods publickey
+
+          # Per-user overrides
+          Match User service
+            AllowTcpForwarding yes
+
+    # DHCP network config for QEMU SLIRP (replaces the static IP config in config.yaml)
+    - path: /etc/systemd/network/10-tap.network
+      mode: 0644
+      contents:
+        inline: |
+          [Match]
+          MACAddress=52:54:00:12:34:56
+
+          [Network]
+          DHCP=yes
+          DNS=10.0.2.3
+
+    - path: /etc/systemd/resolved.conf.d/dns.conf
+      mode: 0644
+      contents:
+        inline: |
+          [Resolve]
+          DNS=10.0.2.3
+          FallbackDNS=8.8.8.8 8.8.4.4
+          DNSStubListener=yes
+
+    # Sudoers entry for service user - can run docker commands
+    - path: /etc/sudoers.d/service
+      mode: 0440
+      contents:
+        inline: |
+          service ALL=(ALL) NOPASSWD: /usr/bin/docker, /usr/bin/systemctl
+
+passwd:
+  users:
+    - name: service
+      shell: /bin/bash
+      groups:
+        - docker
+        - sudo
+      ssh_authorized_keys:
+        - SERVICE_SSH_PUBLIC_KEY_PLACEHOLDER
+
+systemd:
+  units:
+    - name: sshd.service
+      enabled: true
+
+    - name: systemd-resolved.service
+      enabled: true
+
+    - name: docker.service
+      enabled: true
+
+    - name: agent.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Crude Agent
+        After=docker.service network-online.target
+        Requires=docker.service
+        Wants=network-online.target
+
+        [Service]
+        Restart=always
+        RestartSec=5s
+        ExecStartPre=-/usr/bin/docker rm -f agent
+        ExecStartPre=/usr/bin/docker pull 192.168.100.1:5000/crudeagent:latest
+        ExecStart=/usr/bin/docker run \
+          --name agent \
+          -p 8080:8080 \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          192.168.100.1:5000/crudeagent:latest
+        ExecStop=/usr/bin/docker stop agent
+
+        [Install]
+        WantedBy=multi-user.target

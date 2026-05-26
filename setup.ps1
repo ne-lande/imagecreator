@@ -104,7 +104,7 @@ $EfiVars     = Join-Path $ScriptDir "flatcar_production_qemu_uefi_efi_vars.qcow2
 $EfiVarsOrig = Join-Path $ScriptDir "flatcar_production_qemu_uefi_efi_vars.qcow2.orig"
 $VmImage     = Join-Path $ScriptDir "flatcar_production_qemu_uefi_image.img"
 $VmImageOrig = Join-Path $ScriptDir "flatcar_production_qemu_uefi_image.img.orig"
-$ConfigYaml  = Join-Path $ScriptDir "config.yaml"
+$ConfigYaml  = Join-Path $ScriptDir "config.windows.yaml"
 $ConfigIgn   = Join-Path $ScriptDir "config.ign"
 $ConfigRendered = Join-Path $ScriptDir "config.yaml.rendered"
 
@@ -286,6 +286,8 @@ Write-Host "`n=== Step 5: Convert Butane config to Ignition ===" -ForegroundColo
 #                           no address substitution needed.
 #       Local/custom     -> replace 192.168.100.1 with 10.0.2.2 (SLIRP host)
 #                           and rewrite the image ref to $VmRegistryRef.
+# config.windows.yaml is used instead of config.yaml - it has DHCP networking
+# instead of the static IP config, which is required for QEMU SLIRP on Windows.
 $ConfigContent = Get-Content $ConfigYaml -Raw
 $ConfigContent = $ConfigContent -replace 'SERVICE_SSH_PUBLIC_KEY_PLACEHOLDER', $ServicePubkey
 
