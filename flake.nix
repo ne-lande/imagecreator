@@ -18,6 +18,7 @@
           pkgs.libguestfs-with-appliance
           pkgs.qemu
           pkgs.butane
+          pkgs.powershell
         ];
       };
     };

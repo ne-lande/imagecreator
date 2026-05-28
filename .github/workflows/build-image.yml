@@ -1,0 +1,73 @@
+name: Build Provisioned Flatcar Image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      FLATCAR_VERSION: "4593.2.1"
+      FLATCAR_ARCH: "amd64"
+      BUTANE_VERSION: "0.23.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM permissions
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Cache Flatcar base images
+        id: cache-flatcar
+        uses: actions/cache@v4
+        with:
+          path: |
+            flatcar_production_qemu_uefi_efi_code.qcow2
+            flatcar_production_qemu_uefi_efi_vars.qcow2.orig
+            flatcar_production_qemu_uefi_image.img.orig
+          key: flatcar-${{ env.FLATCAR_VERSION }}-${{ env.FLATCAR_ARCH }}
+
+      - name: Download Flatcar images
+        if: steps.cache-flatcar.outputs.cache-hit != 'true'
+        run: |
+          BASE="https://stable.release.flatcar-linux.net/${FLATCAR_ARCH}-usr/${FLATCAR_VERSION}"
+          wget -q --show-progress \
+            -O flatcar_production_qemu_uefi_efi_code.qcow2 \
+            "${BASE}/flatcar_production_qemu_uefi_efi_code.qcow2"
+          wget -q --show-progress \
+            -O flatcar_production_qemu_uefi_efi_vars.qcow2.orig \
+            "${BASE}/flatcar_production_qemu_uefi_efi_vars.qcow2"
+          wget -q --show-progress \
+            -O flatcar_production_qemu_uefi_image.img.orig \
+            "${BASE}/flatcar_production_qemu_uefi_image.img"
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y qemu-system-x86
+
+      - name: Install butane
+        run: |
+          wget -q \
+            -O /usr/local/bin/butane \
+            "https://github.com/coreos/butane/releases/download/v${BUTANE_VERSION}/butane-x86_64-unknown-linux-gnu"
+          chmod +x /usr/local/bin/butane
+
+      - name: Provision Flatcar image
+        run: bash provision-ci.sh
+
+      - name: Upload provisioned image
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatcar-provisioned-${{ env.FLATCAR_VERSION }}-${{ github.sha }}
+          path: |
+            flatcar_production_qemu_uefi_image.img
+            flatcar_production_qemu_uefi_efi_vars.qcow2
+          retention-days: 30

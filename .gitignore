@@ -3,5 +3,5 @@ config.yaml.rendered
 .direnv
 .ssh/
 flatcar_production_qemu*
-# Windows: auto-downloaded butane binary
+config.ign
 butane.exe
