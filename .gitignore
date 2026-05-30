@@ -5,3 +5,7 @@ config.yaml.rendered
 flatcar_production_qemu*
 config.ign
 butane.exe
+
+flatcar-provisioned.zip
+qemu-console.log
+qemu.log

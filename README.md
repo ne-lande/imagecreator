@@ -4,6 +4,58 @@ Builds and launches a Flatcar Linux QEMU VM pre-configured to run the CrudeAgent
 
 > **Platform support:** full scripts are provided for both **Linux** (`setup.sh` / `download.sh`) and **Windows** (`setup.ps1` / `download.ps1`). Jump to the relevant section below.
 
+### Using prebuilt images (Windows)
+
+Instead of running the full provisioning pipeline locally, `install.ps1` can
+download a prebuilt provisioned image from **any URL** — a GitHub Actions
+artifact, a GitHub release asset, an S3 object, or any plain HTTP(S) link.
+
+#### One-liner: run without cloning the repo
+
+`install.ps1` is fully self-contained — it does not need any other file from
+the repository at runtime. You can fetch it directly from GitHub and execute
+it in a single PowerShell command (run as **Administrator**):
+
+```powershell
+# Download install.ps1 to the current directory and run it.
+$u = "https://raw.githubusercontent.com/ne-lande/imagecreator/main/install.ps1"
+Invoke-WebRequest -Uri $u -OutFile .\install.ps1 -UseBasicParsing
+.\install.ps1 -ImageUrl "https://example.com/flatcar-provisioned.zip"
+```
+
+Or pipe it straight into PowerShell without writing a file. The trailing
+`@args` forwards every argument you pass to the outer `powershell -Command`
+into the script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/ne-lande/imagecreator/main/install.ps1' -UseBasicParsing).Content)) @args" `
+    -ImageUrl "https://example.com/flatcar-provisioned.zip"
+```
+
+If PowerShell blocks script execution, run once per user:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+#### Usage examples
+
+```powershell
+# Archive (.zip / .tar / .tar.gz / .tar.xz) containing both files:
+.\install.ps1 -ImageUrl "https://example.com/flatcar-provisioned.zip"
+
+# Raw .img file - EFI vars are fetched from the Flatcar CDN automatically:
+.\install.ps1 -ImageUrl "https://example.com/flatcar_production_qemu_uefi_image.img"
+
+# Raw .img file + matching EFI vars qcow2:
+.\install.ps1 `
+    -ImageUrl    "https://example.com/flatcar_production_qemu_uefi_image.img" `
+    -EfiVarsUrl  "https://example.com/flatcar_production_qemu_uefi_efi_vars.qcow2"
+
+# Private URL requiring a Bearer token (e.g. a GitHub artifact):
+.\install.ps1 -ImageUrl "https://api.github.com/.../artifacts/123/zip" -GitHubToken "ghp_..."
+```
+
 ---
 
 ## Linux

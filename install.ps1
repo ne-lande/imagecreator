@@ -17,12 +17,21 @@
     Run as Administrator: required for the hosts file and the scheduled task.
 
 .PARAMETER ImageUrl
-    HTTPS URL to a ZIP archive containing the provisioned image files
-    (flatcar_production_qemu_uefi_image.img and
-     flatcar_production_qemu_uefi_efi_vars.qcow2).
-    Typical source: a GitHub Actions artifact download link.
+    HTTPS URL to either:
+      * a ZIP / tar(.gz|.xz) archive containing the provisioned image files
+        (flatcar_production_qemu_uefi_image.img and
+         flatcar_production_qemu_uefi_efi_vars.qcow2), or
+      * a single raw image file (.img or .qcow2). Use -EfiVarsUrl in
+        addition to provide the matching EFI vars file; otherwise the
+        pristine EFI vars from the Flatcar CDN are downloaded.
+    Typical sources: a GitHub Actions artifact download link, a release
+    asset on GitHub, an S3 object, or any plain HTTP(S) URL.
     If this parameter and -GitHubRepo are both omitted, the script checks
     for existing local files and errors out if none are found.
+.PARAMETER EfiVarsUrl
+    Optional HTTPS URL to a prebuilt EFI vars qcow2 file that pairs with
+    -ImageUrl when the latter points to a raw .img file rather than an
+    archive. Ignored when -ImageUrl is an archive.
 .PARAMETER GitHubRepo
     GitHub repository in "owner/repo" form.  When set (and -ImageUrl is empty),
     the script calls the GitHub Actions API to locate the newest
@@ -42,6 +51,9 @@
 .PARAMETER SshPort
     Host TCP port forwarded to the VM's SSH daemon (guest port 22).
     Default: 2222.
+.PARAMETER ExtraPort
+    Extra host TCP port forwarded 1:1 to the VM (host port == guest port).
+    Default: 7891.  Set to 0 to disable.
 .PARAMETER TaskName
     Name of the Windows scheduled task used for VM autostart.
     Default: FlatcarVM.
@@ -54,12 +66,14 @@
 [CmdletBinding()]
 param(
     [string] $ImageUrl    = "",
+    [string] $EfiVarsUrl  = "",
     [string] $GitHubRepo  = "",
     [string] $GitHubToken = "",
     [string] $InstallDir  = $PSScriptRoot,
     [string] $VmHostname  = "crudeagent.local",
     [int]    $AgentPort   = 8080,
     [int]    $SshPort     = 2222,
+    [int]    $ExtraPort   = 7891,
     [string] $TaskName    = "FlatcarVM",
     [switch] $NoAutostart,
     [switch] $UseWhpx
@@ -136,9 +150,9 @@ if ($QemuBin) {
     $ver = (& $QemuBin --version 2>&1 | Select-Object -First 1)
     Write-Ok "Found: $QemuBin"
     Write-Host "       $ver" -ForegroundColor DarkGray
-    $Results["QEMU"] = "already installed — $ver"
+    $Results["QEMU"] = "already installed - $ver"
 } else {
-    Write-Host "  QEMU not found — attempting install via winget..." -ForegroundColor Yellow
+    Write-Host "  QEMU not found - attempting install via winget..." -ForegroundColor Yellow
 
     $installed = $false
     $winget = Get-Command "winget" -ErrorAction SilentlyContinue
@@ -178,7 +192,7 @@ if ($QemuBin) {
             $ver = (& $QemuBin --version 2>&1 | Select-Object -First 1)
             Write-Ok "Installed: $QemuBin"
             Write-Host "           $ver" -ForegroundColor DarkGray
-            $Results["QEMU"] = "installed — $ver"
+            $Results["QEMU"] = "installed - $ver"
         } else {
             Write-Fail "Installed but binary not found. Add 'C:\Program Files\qemu' to PATH."
             $QemuBin = "C:\Program Files\qemu\qemu-system-x86_64.exe"
@@ -196,15 +210,48 @@ if ($imagePresent) {
     Write-Skip "Provisioned image files already exist in $InstallDir"
     $Results["Provisioned image"] = "already present"
 } elseif ($ImageUrl -ne "") {
-    $archive = Join-Path $env:TEMP "flatcar-provisioned.zip"
     $dlHeaders = @{ "Accept" = "application/octet-stream" }
     if ($GitHubToken -ne "") { $dlHeaders["Authorization"] = "Bearer $GitHubToken" }
-    Save-File -Url $ImageUrl -Dest $archive -Headers $dlHeaders
-    Write-Host "  Extracting to $InstallDir ..."
-    Expand-Archive -Path $archive -DestinationPath $InstallDir -Force
-    Remove-Item $archive -Force
-    Write-Ok "Provisioned image extracted"
-    $Results["Provisioned image"] = "downloaded from URL"
+
+    # Detect content type by the URL path (ignore query string).
+    $urlPath = ([uri]$ImageUrl).AbsolutePath.ToLowerInvariant()
+    $isArchive = $urlPath -match '\.(zip|tar|tar\.gz|tgz|tar\.xz|txz)$'
+    $isRawImg  = $urlPath -match '\.(img|raw)$'
+    $isQcow    = $urlPath -match '\.qcow2$'
+
+    if ($isArchive -or -not ($isRawImg -or $isQcow)) {
+        # Treat unknown extensions as archives for backward compatibility.
+        $archive = Join-Path $env:TEMP "flatcar-provisioned-download"
+        Save-File -Url $ImageUrl -Dest $archive -Headers $dlHeaders
+        Write-Host "  Extracting to $InstallDir ..."
+        if ($urlPath -match '\.zip$' -or -not $isArchive) {
+            Expand-Archive -Path $archive -DestinationPath $InstallDir -Force
+        } else {
+            # tar variants - use the bundled tar.exe (Windows 10 1803+).
+            & tar -xf $archive -C $InstallDir
+            if ($LASTEXITCODE -ne 0) { Write-Error "tar extraction failed" }
+        }
+        Remove-Item $archive -Force
+        Write-Ok "Provisioned image extracted"
+        $Results["Provisioned image"] = "downloaded from URL (archive)"
+    } else {
+        # Direct download of a single raw image file.
+        if ($isRawImg) { $dest = $VmImage } else { $dest = $EfiVars }
+        Save-File -Url $ImageUrl -Dest $dest -Headers $dlHeaders
+        Write-Ok "Image downloaded to $(Split-Path $dest -Leaf)"
+
+        if ($EfiVarsUrl -ne "") {
+            $efiHeaders = @{ "Accept" = "application/octet-stream" }
+            if ($GitHubToken -ne "") { $efiHeaders["Authorization"] = "Bearer $GitHubToken" }
+            Save-File -Url $EfiVarsUrl -Dest $EfiVars -Headers $efiHeaders
+            Write-Ok "EFI vars downloaded from -EfiVarsUrl"
+        } elseif (-not (Test-Path $EfiVars)) {
+            $efiVarsCdn = "${FlatcarCdnBase}/flatcar_production_qemu_uefi_efi_vars.qcow2"
+            Save-File -Url $efiVarsCdn -Dest $EfiVars
+            Write-Ok "EFI vars downloaded from Flatcar CDN"
+        }
+        $Results["Provisioned image"] = "downloaded from URL (raw image)"
+    }
 } elseif ($GitHubRepo -ne "") {
     Write-Host "  Querying GitHub Actions API for latest artifact in $GitHubRepo ..."
     $apiHeaders = @{
@@ -224,7 +271,7 @@ if ($imagePresent) {
         Write-Fail "No 'flatcar-provisioned-*' artifact found in $GitHubRepo."
         Write-Host "  Run the 'Build Provisioned Flatcar Image' workflow first," -ForegroundColor Yellow
         Write-Host "  or supply a direct URL via -ImageUrl." -ForegroundColor Yellow
-        $Results["Provisioned image"] = "not found — run the CI workflow first"
+        $Results["Provisioned image"] = "not found - run the CI workflow first"
     } else {
         Write-Host "  Found: $($artifact.name)  (created $($artifact.created_at))"
         $archive = Join-Path $env:TEMP "flatcar-provisioned.zip"
@@ -233,7 +280,7 @@ if ($imagePresent) {
         Expand-Archive -Path $archive -DestinationPath $InstallDir -Force
         Remove-Item $archive -Force
         Write-Ok "Provisioned image extracted"
-        $Results["Provisioned image"] = "downloaded — $($artifact.name)"
+        $Results["Provisioned image"] = "downloaded - $($artifact.name)"
     }
 } else {
     Write-Fail "Image files not found and no download source provided."
@@ -241,7 +288,7 @@ if ($imagePresent) {
     Write-Host "    -ImageUrl    <direct ZIP url>" -ForegroundColor Yellow
     Write-Host "    -GitHubRepo  owner/repo  [-GitHubToken token]" -ForegroundColor Yellow
     Write-Host "  Or build locally with:  .\download.ps1  then  .\setup.ps1" -ForegroundColor Yellow
-    $Results["Provisioned image"] = "missing — no source specified"
+    $Results["Provisioned image"] = "missing - no source specified"
 }
 
 
@@ -271,7 +318,7 @@ if ($NoAutostart) {
     # Build the launcher script content with all paths baked in as string literals.
     # Single-quote doubling ('') is how you embed a literal ' inside a PS string.
     $launcherLines = @(
-        "# Auto-generated by install.ps1 — do not edit manually."
+        "# Auto-generated by install.ps1 - do not edit manually."
         "# Starts the Flatcar VM in the background at system boot."
         ""
         'Start-Process -FilePath "' + ($QemuExe   -replace '"', '`"') + '" `'
@@ -290,7 +337,11 @@ if ($NoAutostart) {
         "        '-drive',   'if=pflash,unit=1,file=$($EfiVars -replace '''',''''''),format=qcow2',"
         "        '-drive',   'if=none,id=blk,file=$($VmImage   -replace '''','''''')',"
         "        '-device',  'virtio-blk-pci,drive=blk,bootindex=1',"
-        "        '-netdev',  'user,id=net0,hostfwd=tcp::$AgentPort-:8080,hostfwd=tcp::$SshPort-:22',"
+        "        '-netdev',  '$(
+            $fwd = "user,id=net0,hostfwd=tcp::$AgentPort-:8080,hostfwd=tcp::$SshPort-:22"
+            if ($ExtraPort -gt 0) { $fwd += ",hostfwd=tcp::$ExtraPort-:$ExtraPort" }
+            $fwd
+        )',"
         "        '-device',  'virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56',"
         "        '-object',  'rng-builtin,id=rng0',"
         "        '-device',  'virtio-rng-pci,rng=rng0',"
@@ -381,5 +432,5 @@ if ($allFilesReady) {
     Write-Host "  ssh -p $SshPort service@localhost" -ForegroundColor White
 } else {
     Write-Host ""
-    Write-Host "Image files are incomplete — resolve download issues before starting the VM." -ForegroundColor Red
+    Write-Host "Image files are incomplete - resolve download issues before starting the VM." -ForegroundColor Red
 }

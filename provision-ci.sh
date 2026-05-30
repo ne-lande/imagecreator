@@ -39,8 +39,11 @@ fi
 SERVICE_PUBKEY=$(cat "${SSH_KEY}.pub")
 
 echo "=== Step 2: Convert butane config to ignition ==="
-sed "s|SERVICE_SSH_PUBLIC_KEY_PLACEHOLDER|${SERVICE_PUBKEY}|g" \
-    "${SCRIPT_DIR}/config.yaml" > "${SCRIPT_DIR}/config.yaml.rendered"
+# Use the Windows/SLIRP config: it uses DHCP, which is what QEMU user-mode
+# networking provides (10.0.2.15). config.yaml's static 192.168.100.10
+# would leave the VM unreachable via the host's hostfwd port forward.
+sed -e "s|SERVICE_SSH_PUBLIC_KEY_PLACEHOLDER|${SERVICE_PUBKEY}|g" \
+    "${SCRIPT_DIR}/config.windows.yaml" > "${SCRIPT_DIR}/config.yaml.rendered"
 butane --strict "${SCRIPT_DIR}/config.yaml.rendered" > "${SCRIPT_DIR}/config.ign"
 rm -f "${SCRIPT_DIR}/config.yaml.rendered"
 
