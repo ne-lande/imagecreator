@@ -68,9 +68,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
 $EfiCode         = Join-Path $InstallDir "flatcar_production_qemu_uefi_efi_code.qcow2"
 $EfiVars         = Join-Path $InstallDir "flatcar_production_qemu_uefi_efi_vars.qcow2"
 $VmImage         = Join-Path $InstallDir "flatcar_production_qemu_uefi_image.img"
@@ -81,9 +78,6 @@ $FlatcarVersion  = "4593.2.1"
 $FlatcarArch     = "amd64"
 $FlatcarCdnBase  = "https://stable.release.flatcar-linux.net/${FlatcarArch}-usr/${FlatcarVersion}"
 
-# ---------------------------------------------------------------------------
-# Results table (populated as each step completes)
-# ---------------------------------------------------------------------------
 $Results = [ordered]@{
     "QEMU"           = "pending"
     "Provisioned image" = "pending"
@@ -92,9 +86,6 @@ $Results = [ordered]@{
     "Hosts entry"    = "pending"
 }
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 function Write-Step([string]$Text) {
     Write-Host "`n=== $Text ===" -ForegroundColor Cyan
 }
@@ -111,7 +102,6 @@ function Write-Fail([string]$Text) {
     Write-Host "  [FAIL] $Text" -ForegroundColor Red
 }
 
-# Download a file; uses BITS for large transfers, falls back to Invoke-WebRequest.
 function Save-File {
     param(
         [string]    $Url,
@@ -130,7 +120,6 @@ function Save-File {
     }
 }
 
-# Return the path to qemu-system-x86_64.exe, or $null if not found.
 function Find-Qemu {
     $cmd = Get-Command "qemu-system-x86_64" -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
@@ -139,9 +128,7 @@ function Find-Qemu {
     return $null
 }
 
-# ---------------------------------------------------------------------------
-# Step 1: Check for QEMU; install if missing
-# ---------------------------------------------------------------------------
+
 Write-Step "Step 1: Check for QEMU"
 
 $QemuBin = Find-Qemu
@@ -200,9 +187,7 @@ if ($QemuBin) {
     }
 }
 
-# ---------------------------------------------------------------------------
-# Step 2: Download provisioned image files
-# ---------------------------------------------------------------------------
+
 Write-Step "Step 2: Download provisioned Flatcar image"
 
 $imagePresent = (Test-Path $EfiVars) -and (Test-Path $VmImage)
@@ -259,9 +244,7 @@ if ($imagePresent) {
     $Results["Provisioned image"] = "missing — no source specified"
 }
 
-# ---------------------------------------------------------------------------
-# Step 3: Ensure EFI code firmware (read-only blob, always from Flatcar CDN)
-# ---------------------------------------------------------------------------
+
 Write-Step "Step 3: Check EFI firmware"
 
 if (Test-Path $EfiCode) {
@@ -274,9 +257,7 @@ if (Test-Path $EfiCode) {
     $Results["EFI firmware"] = "downloaded from Flatcar CDN (v$FlatcarVersion)"
 }
 
-# ---------------------------------------------------------------------------
-# Step 4: Write launcher script + register scheduled task
-# ---------------------------------------------------------------------------
+
 Write-Step "Step 4: Register autostart task"
 
 if ($NoAutostart) {
@@ -320,7 +301,6 @@ if ($NoAutostart) {
     [System.IO.File]::WriteAllText($AutostartScript, ($launcherLines -join "`r`n"), $Utf8NoBom)
     Write-Ok "Launcher written to $AutostartScript"
 
-    # Register the scheduled task (replace any existing task with the same name)
     $action   = New-ScheduledTaskAction `
         -Execute   "powershell.exe" `
         -Argument  "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$AutostartScript`""
@@ -344,9 +324,7 @@ if ($NoAutostart) {
     $Results["Autostart task"] = "registered as '$TaskName'"
 }
 
-# ---------------------------------------------------------------------------
-# Step 5: Add hosts file entry
-# ---------------------------------------------------------------------------
+
 Write-Step "Step 5: Update hosts file"
 
 $hostsEntry = "127.0.0.1`t$VmHostname"
@@ -363,9 +341,7 @@ if ($existing) {
     $Results["Hosts entry"] = "added ($hostsEntry)"
 }
 
-# ---------------------------------------------------------------------------
-# Step 6: Summary report
-# ---------------------------------------------------------------------------
+# Summary report
 $divider = "=" * 62
 Write-Host "`n$divider" -ForegroundColor Cyan
 Write-Host ("  {0,-22} {1}" -f "Component", "Result") -ForegroundColor Cyan
