@@ -223,12 +223,21 @@ if ($imagePresent) {
     $isQcow    = $urlPath -match '\.qcow2$'
 
     if ($isArchive -or -not ($isRawImg -or $isQcow)) {
-        # Treat unknown extensions as archives for backward compatibility.
-        $archive = Join-Path $env:TEMP "flatcar-provisioned-download"
+        # Treat unknown extensions as ZIP archives for backward compatibility.
+        # IMPORTANT: Expand-Archive requires the file to end in ".zip" or it
+        # fails with "The archive file ... is not in the supported format."
+        # Pick an on-disk extension that matches the URL so the right
+        # extractor (Expand-Archive vs tar) sees a recognisable filename.
+        if     ($urlPath -match '\.(tar\.gz|tgz)$') { $ext = ".tar.gz" }
+        elseif ($urlPath -match '\.(tar\.xz|txz)$') { $ext = ".tar.xz" }
+        elseif ($urlPath -match '\.tar$')          { $ext = ".tar" }
+        else                                        { $ext = ".zip" }
+        $archive = Join-Path $env:TEMP ("flatcar-provisioned-download" + $ext)
+        if (Test-Path $archive) { Remove-Item $archive -Force }
         Save-File -Url $ImageUrl -Dest $archive -Headers $dlHeaders
         Write-Host "  Extracting to $InstallDir ..."
-        if ($urlPath -match '\.zip$' -or -not $isArchive) {
-            Expand-Archive -Path $archive -DestinationPath $InstallDir -Force
+        if ($ext -eq ".zip") {
+            Expand-Archive -LiteralPath $archive -DestinationPath $InstallDir -Force
         } else {
             # tar variants - use the bundled tar.exe (Windows 10 1803+).
             & tar -xf $archive -C $InstallDir
