@@ -157,8 +157,11 @@ if ($QemuBin) {
     $installed = $false
     $winget = Get-Command "winget" -ErrorAction SilentlyContinue
     if ($winget) {
+        # The QEMU package is published under the "SoftwareFreedomConservancy"
+        # namespace in the official winget-pkgs community repo.
+        # ("QEMU.QEMU" - which used to exist - returns "No package found".)
         $proc = Start-Process "winget" `
-            -ArgumentList "install --id QEMU.QEMU --source winget --silent --accept-package-agreements --accept-source-agreements" `
+            -ArgumentList "install --id SoftwareFreedomConservancy.QEMU --source winget --silent --accept-package-agreements --accept-source-agreements" `
             -Wait -PassThru -NoNewWindow
         # 0 = success, -1978335212 (0x8A150014) = already installed
         if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq -1978335212) {
